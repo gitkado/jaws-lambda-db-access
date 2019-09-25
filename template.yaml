@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: db access.
+
+Resources:
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc.html
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+  MySubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.1.10.0/24
+      AvailabilityZone: ap-northeast-1a
+  MySubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: 10.1.20.0/24
+      AvailabilityZone: ap-northeast-1c
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group.html
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+        GroupDescription: Allow http to client host
+        VpcId: !Ref MyVPC
+        SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-dynamodb-table.html
+  AccessDynamoDB:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        -
+          AttributeName: id
+          AttributeType: S
+      KeySchema:
+        -
+          AttributeName: id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      TableName: access_table
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-rds-database-instance.html
+  AccessRDS:
+    Type: AWS::RDS::DBInstance
+    Properties: 
+      AllocatedStorage: '20'
+      DBInstanceClass: db.t2.micro
+      DBName : access_db
+      MasterUsername: rootuser
+      MasterUserPassword: rootuser00
+      Engine: MySQL
+      PubliclyAccessible: false
+    DeletionPolicy: Delete
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+  DynamoAccessFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:*
+                  - dynamodb:*
+  # https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+  RdsAccessFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:*
+                  - rds:*
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+  # https://docs.aws.amazon.com/ja_jp/serverless-application-model/latest/developerguide/serverless-sam-cli-layers.html
+  DynamoAccessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: function.handler
+      Runtime: ruby2.5
+      FunctionName: dynamo-access-func
+      CodeUri: ./dynamo-access-func
+      Timeout: 10
+      Role: !GetAtt DynamoAccessFunctionRole.Arn
+      Events:
+        GetResource:
+          Type: Api
+          Properties:
+            Path: /dynamo_access
+            Method: get
+  # https://docs.aws.amazon.com/ja_jp/serverless-application-model/latest/developerguide/serverless-sam-cli-layers.html
+  RdsAccessFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: function.handler
+      Runtime: ruby2.5
+      FunctionName: rds-access-func
+      CodeUri: ./rds-access-func
+      Timeout: 10
+      Role: !GetAtt RdsAccessFunctionRole.Arn
+      Environment:
+        Variables:
+          RDS_ARN: !GetAtt AccessRDS.Endpoint.Address
+      Events:
+        GetResource:
+          Type: Api
+          Properties:
+            Path: /rds_access
+            Method: get
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref InstanceSecurityGroup
+        SubnetIds:
+          - !Ref MySubnet1
+          - !Ref MySubnet2
+  # https://docs.aws.amazon.com/ja_jp/serverless-application-model/latest/developerguide/serverless-sam-cli-layers.html
+  RdsCreateTableFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: function.handler
+      Runtime: ruby2.5
+      FunctionName: rds-create-table-func
+      CodeUri: ./rds-create-table-func
+      Timeout: 10
+      Role: !GetAtt RdsAccessFunctionRole.Arn
+      Environment:
+        Variables:
+          RDS_ARN: !GetAtt AccessRDS.Endpoint.Address
+      Events:
+        GetResource:
+          Type: Api
+          Properties:
+            Path: /rds_create_table
+            Method: get
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref InstanceSecurityGroup
+        SubnetIds:
+          - !Ref MySubnet1
+          - !Ref MySubnet2
+
+Outputs:
+  DynamoAccessFunction:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/dynamo_access"
+  RdsAccessFunction:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/rds_access"
+  RdsCreateTableFunction:
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/rds_create_table"
